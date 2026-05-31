@@ -1644,12 +1644,13 @@ TEST(cli_detect_agents_finds_antigravity) {
         SKIP("cbm_mkdtemp failed");
 
     char dir[512];
-    snprintf(dir, sizeof(dir), "%s/.gemini/antigravity", tmpdir);
+    /* Antigravity CLI installs under ~/.gemini/antigravity-cli/ (2026). */
+    snprintf(dir, sizeof(dir), "%s/.gemini/antigravity-cli", tmpdir);
     test_mkdirp(dir);
 
     cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
     ASSERT_TRUE(agents.antigravity);
-    ASSERT_TRUE(agents.gemini); /* parent dir implies gemini too */
+    ASSERT_TRUE(agents.gemini); /* parent ~/.gemini implies gemini too */
 
     test_rmdir_r(tmpdir);
     PASS();

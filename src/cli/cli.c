@@ -1060,10 +1060,12 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
 
     agents.opencode = cbm_find_cli("opencode", home_dir)[0] != '\0';
 
-    snprintf(path, sizeof(path), "%s/.gemini/antigravity", home_dir);
+    /* Antigravity CLI (2026 unification) installs under ~/.gemini/antigravity-cli/
+     * (brain/, mcp/, settings.json), with MCP config in the shared
+     * ~/.gemini/config/mcp_config.json. */
+    snprintf(path, sizeof(path), "%s/.gemini/antigravity-cli", home_dir);
     if (dir_exists(path)) {
         agents.antigravity = true;
-        agents.gemini = true;
     }
 
     agents.aider = cbm_find_cli("aider", home_dir)[0] != '\0';
@@ -3099,14 +3101,22 @@ static void install_cli_agent_configs(const cbm_detected_agents_t *agents, const
     if (agents->antigravity) {
         char cp[CLI_BUF_1K];
         char ip[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.gemini/antigravity/mcp_config.json", home);
-        snprintf(ip, sizeof(ip), "%s/.gemini/antigravity/AGENTS.md", home);
+        /* MCP config is the SHARED Antigravity config (CLI + IDE), not a
+         * per-tool file (2026 unification). */
+        snprintf(cp, sizeof(cp), "%s/.gemini/config/mcp_config.json", home);
+        snprintf(ip, sizeof(ip), "%s/.gemini/antigravity-cli/AGENTS.md", home);
+        if (!dry_run && !g_install_plan) {
+            char cfg_dir[CLI_BUF_1K];
+            snprintf(cfg_dir, sizeof(cfg_dir), "%s/.gemini/config", home);
+            cbm_mkdir_p(cfg_dir, CLI_OCTAL_PERM);
+        }
         install_generic_agent_config("Antigravity", binary_path, cp, ip, dry_run,
                                      cbm_upsert_antigravity_mcp);
-        /* Antigravity shares Gemini's hooks JSON schema; its settings live in
-         * the antigravity config dir. */
+        /* Antigravity CLI is Gemini-lineage and keeps a settings.json under
+         * ~/.gemini/antigravity-cli/; install the SessionStart reminder there
+         * using the shared Gemini hook JSON schema. */
         char sp[CLI_BUF_1K];
-        snprintf(sp, sizeof(sp), "%s/.gemini/antigravity/settings.json", home);
+        snprintf(sp, sizeof(sp), "%s/.gemini/antigravity-cli/settings.json", home);
         if (g_install_plan) {
             plan_record("Antigravity", "hook", sp);
         } else {
@@ -3544,13 +3554,13 @@ static void uninstall_cli_agents(const cbm_detected_agents_t *agents, const char
     if (agents->antigravity) {
         char cp[CLI_BUF_1K];
         char ip[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.gemini/antigravity/mcp_config.json", home);
-        snprintf(ip, sizeof(ip), "%s/.gemini/antigravity/AGENTS.md", home);
+        snprintf(cp, sizeof(cp), "%s/.gemini/config/mcp_config.json", home);
+        snprintf(ip, sizeof(ip), "%s/.gemini/antigravity-cli/AGENTS.md", home);
         uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Antigravity", cp, ip}, dry_run,
                                   cbm_remove_antigravity_mcp);
         if (!dry_run) {
             char sp[CLI_BUF_1K];
-            snprintf(sp, sizeof(sp), "%s/.gemini/antigravity/settings.json", home);
+            snprintf(sp, sizeof(sp), "%s/.gemini/antigravity-cli/settings.json", home);
             cbm_remove_gemini_session_hooks(sp);
         }
     }

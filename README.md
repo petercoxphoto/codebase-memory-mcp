@@ -339,7 +339,7 @@ Restart your agent. Verify with `/mcp` — you should see `codebase-memory-mcp` 
 | Gemini CLI | `.gemini/settings.json` | `.gemini/GEMINI.md` | BeforeTool (grep reminder) + SessionStart reminder |
 | Zed | `settings.json` (JSONC) | — | — |
 | OpenCode | `opencode.json` | `AGENTS.md` | — |
-| Antigravity | `mcp_config.json` | `AGENTS.md` | SessionStart reminder |
+| Antigravity | `.gemini/config/mcp_config.json` (shared) | `antigravity-cli/AGENTS.md` | SessionStart reminder |
 | Aider | — | `CONVENTIONS.md` | — |
 | KiloCode | `mcp_settings.json` | `~/.kilocode/rules/` | — |
 | VS Code | `Code/User/mcp.json` | — | — |
