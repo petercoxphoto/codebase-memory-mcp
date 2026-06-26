@@ -27,6 +27,19 @@ int tf_skip_count = 0;
 
 #include "test_framework.h"
 
+/* Per-suite summary: redefine RUN_SUITE so every suite prints a one-line
+ * "[SUITE] <name> P passed, F failed" report. Makes the board/fast-lane output
+ * greppable for which suites still have reds without scraping every test line. */
+#undef RUN_SUITE
+#define RUN_SUITE(name)                                                                  \
+    do {                                                                                 \
+        int _p0 = tf_pass_count, _f0 = tf_fail_count;                                    \
+        printf("\n%s=== %s ===%s\n", tf_dim(), #name, tf_reset());                       \
+        suite_##name();                                                                  \
+        printf("[SUITE] %-38s %d passed, %d failed\n", #name, tf_pass_count - _p0,       \
+               tf_fail_count - _f0);                                                     \
+    } while (0)
+
 /* ── Repro suites (one per bug cluster / issue) ─────────────────── */
 extern void suite_repro_extraction(void);
 extern void suite_repro_issue495(void);

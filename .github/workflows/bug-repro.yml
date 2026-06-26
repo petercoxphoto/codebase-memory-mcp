@@ -18,7 +18,9 @@ on:
   # Iteration convenience: any push to a qa/** branch runs the board straight
   # from that branch's own copy of this file (no main merge needed). Non-gating.
   push:
-    branches: ['qa/**']
+    # Exclude the dedicated lane branches so they only run their own workflow
+    # (fast-repro / soak / smoke), not the full board too.
+    branches: ['qa/**', '!qa/fast-**', '!qa/soak-**', '!qa/smoke-**']
 
 permissions:
   contents: read
