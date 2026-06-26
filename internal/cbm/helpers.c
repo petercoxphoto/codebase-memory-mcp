@@ -692,8 +692,23 @@ static const char **func_kinds_for_lang(CBMLanguage lang) {
         return func_kinds_magma;
     case CBM_LANG_WOLFRAM:
         return func_kinds_wolfram;
-    default:
+    default: {
+        /* Enclosing-function drift fix (QUALITY_ANALYSIS gap #3): languages
+         * without a curated func_kinds entry previously fell back to
+         * func_kinds_generic, which misses their real function node types
+         * (e.g. dart function_signature, perl subroutine_declaration_statement,
+         * scss mixin_statement, nix function_expression, fortran subroutine,
+         * cobol program_definition, verilog/vhdl, ...). The enclosing-function
+         * walk then never found the parent function and attributed every
+         * in-body call to the Module node. Use the language spec's
+         * function_node_types (the single source of truth that extraction
+         * already uses) when the curated switch has no entry. Curated languages
+         * above are unchanged. */
+        const CBMLangSpec *spec = cbm_lang_spec(lang);
+        if (spec && spec->function_node_types && spec->function_node_types[0])
+            return spec->function_node_types;
         return func_kinds_generic;
+    }
     }
 }
 
