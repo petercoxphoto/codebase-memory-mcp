@@ -258,6 +258,18 @@ static char *extract_callee_from_fields(CBMArena *a, TSNode node, const char *so
             strcmp(fk, "value_identifier") == 0 || strcmp(fk, "value_identifier_path") == 0) {
             return cbm_node_text(a, func_node, source);
         }
+        // C++ explicit template call f<T>(args): the `function` field is a
+        // template_function whose `name` child is the bare callee (identifier
+        // "identity" or qualified_identifier "ns::f"). Without this the whole
+        // "identity<int>" text would never be produced as a textual callee, so
+        // no CALLS edge — and the LSP's lsp_template resolution has nothing to
+        // attach to. Return the name child so the join recovers the bare method.
+        if (strcmp(fk, "template_function") == 0) {
+            TSNode tname = ts_node_child_by_field_name(func_node, TS_FIELD("name"));
+            if (!ts_node_is_null(tname)) {
+                return cbm_node_text(a, tname, source);
+            }
+        }
         // R member call: module$fn() — function node is an extract_operator
         // with lhs (object) and rhs (method). Emit "module.fn" so it resolves
         // like other member calls (#219). Previously dropped → no CALLS edge.

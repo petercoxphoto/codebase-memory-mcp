@@ -3741,8 +3741,22 @@ static void c_resolve_calls_in_node_inner(CLSPContext *ctx, TSNode node) {
             if (type_qn) {
                 const char *short_name = strrchr(type_qn, '.');
                 short_name = short_name ? short_name + 1 : type_qn;
+                const char *last_colon = strrchr(type_qn, ':');
+                if (last_colon)
+                    short_name = last_colon + 1;
                 const char *ctor_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", type_qn, short_name);
-                c_emit_resolved_call(ctx, ctor_qn, "lsp_constructor", 0.95f);
+                /* Point at the synthesized `Type.Type` ctor node only if it
+                 * actually exists in the registry (explicit constructor). When
+                 * the class has no user-declared constructor there is no such
+                 * node, so resolve `new Foo()` to the Foo CLASS node (type_qn)
+                 * instead — its short name equals the textual callee ("Foo"),
+                 * so the pipeline join matches and a CALLS edge forms. Mirrors
+                 * java_lsp.c object_creation_expression. */
+                if (cbm_registry_lookup_method(ctx->registry, type_qn, short_name)) {
+                    c_emit_resolved_call(ctx, ctor_qn, "lsp_constructor", 0.95f);
+                } else {
+                    c_emit_resolved_call(ctx, type_qn, "lsp_constructor", 0.95f);
+                }
             }
         }
     }

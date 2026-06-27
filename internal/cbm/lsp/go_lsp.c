@@ -1481,7 +1481,42 @@ static void process_function(GoLSPContext* ctx, TSNode func_node) {
     char* func_name = lsp_node_text(ctx, name_node);
     if (!func_name || !func_name[0]) return;
 
-    ctx->enclosing_func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->package_qn, func_name);
+    // For methods, the enclosing-function QN must include the receiver type
+    // (package.Type.Method), matching how the textual extractor and the
+    // registry qualify the method. Building it as package.Method (no receiver)
+    // here made the LSP-resolved call's caller_qn disagree with the textual
+    // call's enclosing_func_qn, so cbm_pipeline_find_lsp_resolution never
+    // joined them — every call inside a method body silently lost its
+    // type-aware LSP strategy. Derive the bare receiver type name the same way
+    // the receiver binding below does.
+    char* recv_type_name = NULL;
+    {
+        TSNode recv0 = ts_node_child_by_field_name(func_node, "receiver", 8);
+        if (!ts_node_is_null(recv0)) {
+            uint32_t rnc0 = ts_node_child_count(recv0);
+            for (uint32_t i = 0; i < rnc0 && !recv_type_name; i++) {
+                TSNode rp = ts_node_child(recv0, i);
+                if (ts_node_is_null(rp) || !ts_node_is_named(rp)) continue;
+                if (strcmp(ts_node_type(rp), "parameter_declaration") != 0) continue;
+                TSNode rtype = ts_node_child_by_field_name(rp, "type", 4);
+                if (ts_node_is_null(rtype)) continue;
+                // Unwrap a pointer receiver (*Type) to the bare type identifier.
+                const char* rtk = ts_node_type(rtype);
+                if (strcmp(rtk, "pointer_type") == 0 && ts_node_named_child_count(rtype) > 0) {
+                    rtype = ts_node_named_child(rtype, 0);
+                }
+                char* tn = lsp_node_text(ctx, rtype);
+                if (tn && tn[0]) recv_type_name = tn;
+            }
+        }
+    }
+
+    if (recv_type_name) {
+        ctx->enclosing_func_qn =
+            cbm_arena_sprintf(ctx->arena, "%s.%s.%s", ctx->package_qn, recv_type_name, func_name);
+    } else {
+        ctx->enclosing_func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->package_qn, func_name);
+    }
 
     // Push function scope
     CBMScope* saved_scope = ctx->current_scope;
