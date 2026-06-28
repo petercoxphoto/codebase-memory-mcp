@@ -303,6 +303,25 @@ static const char *compute_func_qn(CBMExtractCtx *ctx, TSNode node, const CBMLan
         return compute_elixir_func_qn(ctx, node);
     }
 
+    /* Objective-C: a method_definition's selector keyword is a plain `identifier`
+     * child. Resolve the call-scope QN HERE (not via the shared cbm_resolve_func_name)
+     * so an in-body call sources to the method — without making the shared resolver
+     * report the method as a top-level Function (the @implementation class-member
+     * pass already emits the Method node; a shared-resolver name would double it). */
+    if (ctx->language == CBM_LANG_OBJC && strcmp(ts_node_type(node), "method_definition") == 0) {
+        TSNode id = cbm_find_child_by_kind(node, "identifier");
+        if (!ts_node_is_null(id)) {
+            char *mname = cbm_node_text(ctx->arena, id, ctx->source);
+            if (mname && mname[0]) {
+                if (state->enclosing_class_qn) {
+                    return cbm_arena_sprintf(ctx->arena, "%s.%s", state->enclosing_class_qn, mname);
+                }
+                return cbm_fqn_compute_source_lang(ctx->arena, ctx->project, ctx->rel_path, mname,
+                                                   ctx->language);
+            }
+        }
+    }
+
     /* Resolve the function name via the single shared resolver (extract_defs) so
      * call-scope attribution agrees with definition extraction across all ~130
      * grammars. The old private 4-case copy returned NULL for Fortran subroutine,
@@ -350,6 +369,13 @@ static const char *compute_class_qn(CBMExtractCtx *ctx, TSNode node, const WalkS
     /* Newer tree-sitter-kotlin: class/object name is a type_identifier child. */
     if (ts_node_is_null(name_node) && ctx->language == CBM_LANG_KOTLIN) {
         name_node = cbm_find_child_by_kind(node, "type_identifier");
+    }
+    /* Objective-C: class_interface / class_implementation have no `name` field;
+     * the class name is a plain `identifier` child. Without this the walk pushes
+     * no class scope, so a method body's calls source to the Module and the
+     * method itself is mis-extracted as a top-level Function (not a Method). */
+    if (ts_node_is_null(name_node) && ctx->language == CBM_LANG_OBJC) {
+        name_node = cbm_find_child_by_kind(node, "identifier");
     }
     if (ts_node_is_null(name_node)) {
         return NULL;
