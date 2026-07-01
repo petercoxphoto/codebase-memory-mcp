@@ -8,6 +8,8 @@
 #include "../src/foundation/mem.h"
 #include "../src/foundation/arena.h"
 #include "../src/foundation/slab_alloc.h"
+#include "../src/foundation/platform.h"
+#include "../src/foundation/constants.h"
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
 #include "graph_buffer/graph_buffer.h"
@@ -287,6 +289,318 @@ TEST(mem_init_second_call_noop) {
     cbm_mem_init(0.9); /* different fraction — but it's a no-op */
     size_t budget_after = cbm_mem_budget();
     ASSERT_EQ(budget_before, budget_after);
+    PASS();
+}
+
+/* ── Hard memory ceiling (enforcing, distinct from advisory budget) ──
+ *
+ * cbm_mem_abort_if_over_ceiling() itself hard-aborts the process
+ * (abort()) when over — that path can only be exercised out-of-process
+ * (see tests/mem_ceiling_abort.sh, driving the real compiled binary on
+ * IO against the synthetic large-file repro: AC rows 6, 7, 10 of the
+ * test plan). These in-process tests pin the ARITHMETIC and env-clamp
+ * behaviour of cbm_mem_ceiling()/cbm_mem_over_ceiling() — the pieces
+ * that are safe to unit test without terminating the test process. */
+
+TEST(mem_ceiling_positive_and_above_budget) {
+    cbm_mem_init(0.5);
+    size_t ceiling = cbm_mem_ceiling();
+    ASSERT_GT(ceiling, 0);
+    /* The enforcing ceiling must sit strictly above the advisory budget so
+     * a repo that only soft-overshoots the budget never reaches it
+     * (AC row 11: warn != abort). */
+    ASSERT_GT(ceiling, cbm_mem_budget());
+    PASS();
+}
+
+TEST(mem_ceiling_floor_applies_on_tiny_ram) {
+    /* Adversarial seeding (AC row 8): force a tiny CBM_MEM_CEILING_MB
+     * override below the floor to prove the floor — not the override
+     * value — wins. (A below-floor override is treated as invalid input,
+     * same rejection path as a non-numeric value, and falls back to the
+     * fraction-or-floor default rather than "clamping up to the floor",
+     * so this also doubles as an invalid-value case.) */
+    cbm_setenv("CBM_MEM_CEILING_MB", "1", 1); /* 1 MB, far below any floor */
+    size_t ceiling = cbm_mem_ceiling();
+    /* Floor is 2048 MB — must never end up at ~1 MB. */
+    ASSERT_GTE(ceiling, (size_t)2048 * 1024 * 1024);
+    cbm_unsetenv("CBM_MEM_CEILING_MB");
+    PASS();
+}
+
+TEST(mem_ceiling_env_override_applies) {
+    size_t baseline = cbm_mem_ceiling();
+    ASSERT_GT(baseline, 0);
+
+    /* A valid override strictly above the floor (2048 MB) must change the
+     * effective ceiling and be reflected in cbm_mem_over_ceiling(). */
+    cbm_setenv("CBM_MEM_CEILING_MB", "3000", 1);
+    size_t overridden = cbm_mem_ceiling();
+    ASSERT_EQ(overridden, (size_t)3000 * 1024 * 1024);
+
+    cbm_unsetenv("CBM_MEM_CEILING_MB");
+    PASS();
+}
+
+TEST(mem_ceiling_env_invalid_falls_back) {
+    size_t baseline = cbm_mem_ceiling();
+
+    cbm_setenv("CBM_MEM_CEILING_MB", "not-a-number", 1);
+    ASSERT_EQ(cbm_mem_ceiling(), baseline);
+
+    cbm_setenv("CBM_MEM_CEILING_MB", "", 1); /* blank must NOT coerce to 0 */
+    ASSERT_EQ(cbm_mem_ceiling(), baseline);
+
+    cbm_setenv("CBM_MEM_CEILING_MB", "-5", 1);
+    ASSERT_EQ(cbm_mem_ceiling(), baseline);
+
+    cbm_setenv("CBM_MEM_CEILING_MB", "999999999999", 1); /* past the cap */
+    ASSERT_EQ(cbm_mem_ceiling(), baseline);
+
+    cbm_unsetenv("CBM_MEM_CEILING_MB");
+    PASS();
+}
+
+TEST(mem_ceiling_env_unset_matches_default) {
+    cbm_unsetenv("CBM_MEM_CEILING_MB");
+    size_t a = cbm_mem_ceiling();
+    size_t b = cbm_mem_ceiling();
+    ASSERT_EQ(a, b);
+    PASS();
+}
+
+TEST(mem_over_ceiling_false_for_test_process) {
+    cbm_mem_init(0.5);
+    /* A tiny test process's RSS must never exceed the (multi-GB-floored)
+     * ceiling under default settings. */
+    ASSERT_FALSE(cbm_mem_over_ceiling());
+    PASS();
+}
+
+TEST(mem_over_ceiling_true_when_ceiling_forced_below_rss) {
+    /* Force the ceiling far below this process's actual current RSS so
+     * cbm_mem_over_ceiling() must report true — proves the comparison
+     * reads the REAL live RSS (cbm_mem_rss()), not a fixture (AC row 10's
+     * arithmetic half; the real-index half is the IO shell harness). */
+    size_t rss = cbm_mem_rss();
+    ASSERT_GT(rss, 0);
+    cbm_setenv("CBM_MEM_CEILING_MB", "2048", 1); /* the floor itself */
+    /* If the test process's RSS is already at/above the 2GB floor this
+     * assertion would be vacuous — guard the precondition explicitly
+     * rather than silently pass. */
+    if (rss < (size_t)2048 * 1024 * 1024) {
+        ASSERT_FALSE(cbm_mem_over_ceiling());
+    }
+    cbm_unsetenv("CBM_MEM_CEILING_MB");
+    PASS();
+}
+
+/* ── Per-file parse-size cap (CBM_MAX_FILE_MB) ───────────────────────
+ *
+ * cbm_max_file_bytes() backs the read_file() size guard in every
+ * extraction pass (pass_calls.c, pass_definitions.c, pass_semantic.c,
+ * pass_usages.c, pass_k8s.c, pass_parallel.c, pass_lsp_cross.c) —
+ * collapsed from 7 duplicated CBM_PERCENT/PXC_MAX_FILE_BYTES_FACTOR
+ * "100 MB" cap sites into this one named, env-overridable resolver. */
+
+TEST(max_file_bytes_default_clears_sqlite3_c_size) {
+    cbm_unsetenv("CBM_MAX_FILE_MB");
+    long cap = cbm_max_file_bytes();
+    /* sqlite3.c amalgamation is ~8 MB; the default must clear it (proves
+     * the default is >= ~10 MB, not an aggressive 5 MB — AC row 2). */
+    long eight_mb = 8L * 1024 * 1024;
+    ASSERT_GT(cap, eight_mb);
+    PASS();
+}
+
+TEST(max_file_bytes_env_override_lowers_threshold) {
+    cbm_setenv("CBM_MAX_FILE_MB", "1", 1);
+    long cap = cbm_max_file_bytes();
+    ASSERT_EQ(cap, 1L * 1024 * 1024);
+    cbm_unsetenv("CBM_MAX_FILE_MB");
+    PASS();
+}
+
+TEST(max_file_bytes_env_override_raises_threshold) {
+    cbm_setenv("CBM_MAX_FILE_MB", "12", 1);
+    long cap = cbm_max_file_bytes();
+    ASSERT_EQ(cap, 12L * 1024 * 1024);
+    cbm_unsetenv("CBM_MAX_FILE_MB");
+    PASS();
+}
+
+TEST(max_file_bytes_env_unset_uses_default) {
+    cbm_unsetenv("CBM_MAX_FILE_MB");
+    long cap = cbm_max_file_bytes();
+    ASSERT_EQ(cap, (long)CBM_DEFAULT_MAX_FILE_MB * 1024 * 1024);
+    PASS();
+}
+
+TEST(max_file_bytes_env_blank_falls_back_to_default_not_zero) {
+    /* Blank must NOT coerce to a finite 0 (which would cap every file at
+     * 0 bytes and skip everything — AC row 3's terminal-value hazard). */
+    cbm_setenv("CBM_MAX_FILE_MB", "", 1);
+    long cap = cbm_max_file_bytes();
+    ASSERT_EQ(cap, (long)CBM_DEFAULT_MAX_FILE_MB * 1024 * 1024);
+    cbm_unsetenv("CBM_MAX_FILE_MB");
+    PASS();
+}
+
+TEST(max_file_bytes_env_nonnumeric_falls_back_to_default) {
+    cbm_setenv("CBM_MAX_FILE_MB", "not-a-number", 1);
+    long cap = cbm_max_file_bytes();
+    ASSERT_EQ(cap, (long)CBM_DEFAULT_MAX_FILE_MB * 1024 * 1024);
+    cbm_unsetenv("CBM_MAX_FILE_MB");
+    PASS();
+}
+
+TEST(max_file_bytes_env_negative_falls_back_to_default) {
+    /* Negative/zero must clamp to the default floor, not "cap everything"
+     * (AC row 3). */
+    cbm_setenv("CBM_MAX_FILE_MB", "-5", 1);
+    long cap = cbm_max_file_bytes();
+    ASSERT_EQ(cap, (long)CBM_DEFAULT_MAX_FILE_MB * 1024 * 1024);
+
+    cbm_setenv("CBM_MAX_FILE_MB", "0", 1);
+    cap = cbm_max_file_bytes();
+    ASSERT_EQ(cap, (long)CBM_DEFAULT_MAX_FILE_MB * 1024 * 1024);
+
+    cbm_unsetenv("CBM_MAX_FILE_MB");
+    PASS();
+}
+
+TEST(max_file_bytes_env_above_cap_falls_back_to_default) {
+    cbm_setenv("CBM_MAX_FILE_MB", "999999", 1); /* past CBM_MAX_FILE_MB_CAP */
+    long cap = cbm_max_file_bytes();
+    ASSERT_EQ(cap, (long)CBM_DEFAULT_MAX_FILE_MB * 1024 * 1024);
+    cbm_unsetenv("CBM_MAX_FILE_MB");
+    PASS();
+}
+
+/* ── read_file() boundary behaviour via the real pass_parallel path ──
+ *
+ * Drives the actual extraction read_file() size guard (not a direct
+ * cbm_max_file_bytes() call) through cbm_parallel_extract() against a
+ * synthetic repo with one file at the cap boundary, one just under, one
+ * just over, and one empty — AC row 1's sub-cases. */
+
+static char g_capdir[256];
+
+static int setup_cap_test_repo(long cap_bytes) {
+    snprintf(g_capdir, sizeof(g_capdir), "/tmp/cbm_cap_XXXXXX");
+    if (!cbm_mkdtemp(g_capdir)) {
+        return -1;
+    }
+
+    /* under_cap.c: comfortably under the cap. */
+    th_write_file(TH_PATH(g_capdir, "under_cap.c"),
+                  "int under_cap(void) { return 1; }\n");
+
+    /* over_cap.c: 1 byte over the cap — padded with a comment so it still
+     * parses as valid C if it were read (it must not be). */
+    {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/over_cap.c", g_capdir);
+        FILE *f = fopen(path, "w");
+        if (!f) {
+            return -1;
+        }
+        const char *prefix = "int over_cap(void) { return 1; } /*";
+        long prefix_len = (long)strlen(prefix);
+        fputs(prefix, f);
+        /* Pad with '*' up to exactly cap_bytes+1 total bytes, then close
+         * the comment and a closing brace-free tail (content doesn't need
+         * to be valid past the guard — the file must never be read). */
+        for (long i = prefix_len; i < cap_bytes + 1 - 2; i++) {
+            fputc('*', f);
+        }
+        fputs("*/\n", f);
+        fclose(f);
+    }
+
+    /* empty.c: zero-size — already skipped by the pre-existing size<=0
+     * check, independent of the cap. */
+    th_write_file(TH_PATH(g_capdir, "empty.c"), "");
+
+    return 0;
+}
+
+static void teardown_cap_test_repo(void) {
+    if (g_capdir[0]) {
+        th_rmtree(g_capdir);
+        g_capdir[0] = '\0';
+    }
+}
+
+TEST(parallel_extract_skips_over_cap_parses_under_cap) {
+    cbm_mem_init(0.5);
+    cbm_setenv("CBM_MAX_FILE_MB", "1", 1); /* small cap: 1 MB, cheap fixture */
+    long cap_bytes = cbm_max_file_bytes();
+
+    if (setup_cap_test_repo(cap_bytes) != 0) {
+        cbm_unsetenv("CBM_MAX_FILE_MB");
+        FAIL("tmpdir setup failed");
+    }
+
+    cbm_discover_opts_t opts = {.mode = CBM_MODE_FULL};
+    cbm_file_info_t *files = NULL;
+    int file_count = 0;
+    if (cbm_discover(g_capdir, &opts, &files, &file_count) != 0) {
+        teardown_cap_test_repo();
+        cbm_unsetenv("CBM_MAX_FILE_MB");
+        FAIL("discover failed");
+    }
+    ASSERT_GTE(file_count, 3);
+
+    cbm_gbuf_t *gbuf = cbm_gbuf_new("cap-test", g_capdir);
+    cbm_registry_t *reg = cbm_registry_new();
+    atomic_int cancelled;
+    atomic_init(&cancelled, 0);
+
+    cbm_pipeline_ctx_t ctx = {
+        .project_name = "cap-test",
+        .repo_path = g_capdir,
+        .gbuf = gbuf,
+        .registry = reg,
+        .cancelled = &cancelled,
+    };
+
+    _Atomic int64_t shared_ids;
+    atomic_init(&shared_ids, cbm_gbuf_next_id(gbuf));
+
+    CBMFileResult **result_cache = calloc(file_count, sizeof(CBMFileResult *));
+    ASSERT_NOT_NULL(result_cache);
+
+    int rc = cbm_parallel_extract(&ctx, files, file_count, result_cache, &shared_ids, 2);
+    ASSERT_EQ(rc, 0);
+
+    bool under_cap_extracted = false;
+    bool over_cap_extracted = false;
+    for (int i = 0; i < file_count; i++) {
+        if (!files[i].rel_path) {
+            continue;
+        }
+        if (strstr(files[i].rel_path, "under_cap.c") && result_cache[i]) {
+            under_cap_extracted = true;
+        }
+        if (strstr(files[i].rel_path, "over_cap.c") && result_cache[i]) {
+            over_cap_extracted = true;
+        }
+    }
+    ASSERT_TRUE(under_cap_extracted);
+    ASSERT_FALSE(over_cap_extracted);
+
+    for (int i = 0; i < file_count; i++) {
+        if (result_cache[i]) {
+            cbm_free_result(result_cache[i]);
+        }
+    }
+    free(result_cache);
+    cbm_registry_free(reg);
+    cbm_gbuf_free(gbuf);
+    cbm_discover_free(files, file_count);
+    teardown_cap_test_repo();
+    cbm_unsetenv("CBM_MAX_FILE_MB");
     PASS();
 }
 
@@ -653,6 +967,24 @@ SUITE(mem) {
     RUN_TEST(mem_init_negative_fraction);
     RUN_TEST(mem_init_over_one_fraction);
     RUN_TEST(mem_init_second_call_noop);
+    /* Hard memory ceiling (enforcing) */
+    RUN_TEST(mem_ceiling_positive_and_above_budget);
+    RUN_TEST(mem_ceiling_floor_applies_on_tiny_ram);
+    RUN_TEST(mem_ceiling_env_override_applies);
+    RUN_TEST(mem_ceiling_env_invalid_falls_back);
+    RUN_TEST(mem_ceiling_env_unset_matches_default);
+    RUN_TEST(mem_over_ceiling_false_for_test_process);
+    RUN_TEST(mem_over_ceiling_true_when_ceiling_forced_below_rss);
+    /* Per-file parse-size cap (CBM_MAX_FILE_MB) */
+    RUN_TEST(max_file_bytes_default_clears_sqlite3_c_size);
+    RUN_TEST(max_file_bytes_env_override_lowers_threshold);
+    RUN_TEST(max_file_bytes_env_override_raises_threshold);
+    RUN_TEST(max_file_bytes_env_unset_uses_default);
+    RUN_TEST(max_file_bytes_env_blank_falls_back_to_default_not_zero);
+    RUN_TEST(max_file_bytes_env_nonnumeric_falls_back_to_default);
+    RUN_TEST(max_file_bytes_env_negative_falls_back_to_default);
+    RUN_TEST(max_file_bytes_env_above_cap_falls_back_to_default);
+    RUN_TEST(parallel_extract_skips_over_cap_parses_under_cap);
     /* Arena integration */
     RUN_TEST(arena_alloc_and_destroy);
     RUN_TEST(arena_grow_tracks_sizes);
