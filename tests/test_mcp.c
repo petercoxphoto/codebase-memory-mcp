@@ -2411,6 +2411,44 @@ TEST(repo_map_weak_seed_triggers_widen_walk) {
     PASS();
 }
 
+TEST(repo_map_module_usage_neighbor_expands_to_its_file_symbols) {
+    /* Real-corpus refinement (row 3/4 sharpening, added with the
+     * implementation): file-level co-usage arrives as a Module node with a
+     * USAGE edge to the seed (P2 ground truth: sender.py/gmail_client.py
+     * reach extract_address exactly this way). A Module 1-hop neighbour is
+     * not renderable itself but must expand to its file's symbols at the
+     * widen tier — they are the co-change neighbourhood. */
+    cbm_mcp_server_t *srv = rm_setup_server("rm-module-nb");
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *project = "rm-module-nb";
+
+    int64_t s2 = rm_add_node(st, project, "Function", "S2", "rm-module-nb.S2", "pkg/s.go", 5.0,
+                             "S2() error");
+    int64_t mod = rm_add_node_no_score(st, project, "Module", "pkg/user.py", "rm-module-nb.mod",
+                                       "pkg/user.py");
+    rm_add_node(st, project, "Function", "UserHelper", "rm-module-nb.UserHelper", "pkg/user.py",
+               1.0, "UserHelper() int");
+    /* Raw importance ABOVE the widened symbol's raw (1.0) but below its
+     * boosted score (1x25): proves the expansion boost does the ranking. */
+    rm_add_node(st, project, "Function", "BigDeal", "rm-module-nb.BigDeal", "pkg/big.go", 20.0,
+               "BigDeal() error");
+    rm_add_edge(st, project, mod, s2, "USAGE");
+
+    char *text = rm_call(srv, "{\"project\":\"rm-module-nb\",\"seed_anchors\":[\"S2\"],"
+                             "\"token_budget\":100000}");
+    ASSERT_NOT_NULL(text);
+    const char *helper_pos = strstr(text, "UserHelper() int");
+    const char *big_pos = strstr(text, "BigDeal() error");
+    ASSERT_NOT_NULL(helper_pos);
+    ASSERT_NOT_NULL(big_pos);
+    ASSERT_TRUE(helper_pos < big_pos);
+    /* The Module node itself never renders as a map line. */
+    ASSERT_NULL(strstr(text, "pkg/user.py: pkg/user.py"));
+    free(text);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 /* ── Row 5: AC2c empty/unusable seeds → global map ───────────────── */
 
 TEST(repo_map_no_seed_and_empty_seed_and_all_unresolvable_yield_identical_global_map) {
@@ -2647,6 +2685,44 @@ TEST(repo_map_renders_signature_level_no_body_leak) {
     PASS();
 }
 
+TEST(repo_map_param_only_signature_gets_name_prefix_and_ws_flatten) {
+    /* Real-corpus refinement (row 10 sharpening, added with the
+     * implementation): several grammars persist only the parameter list as
+     * the signature ("(self)"), and black-formatted defs embed newlines.
+     * The renderer must prefix the symbol name and flatten whitespace so
+     * every line reads 'file: symbol(sig)' on ONE line. */
+    cbm_mcp_server_t *srv = rm_setup_server("rm-render-prefix");
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+
+    cbm_node_t n = {0};
+    n.project = "rm-render-prefix";
+    n.label = "Method";
+    n.name = "method_a";
+    n.qualified_name = "rm-render-prefix.M.method_a";
+    n.file_path = "pkg/m.py";
+    n.start_line = 1;
+    n.end_line = 4;
+    /* JSON-escaped newlines inside the signature value. */
+    n.properties_json =
+        "{\"importance\":10.0,\"signature\":\"(\\n    self,\\n    x: int\\n)\"}";
+    ASSERT_GT(cbm_store_upsert_node(st, &n), 0);
+
+    char *text = rm_call(srv, "{\"project\":\"rm-render-prefix\"}");
+    ASSERT_NOT_NULL(text);
+    char *map = rm_json_str(text, "map");
+    ASSERT_NOT_NULL(map);
+    ASSERT_NOT_NULL(strstr(map, "pkg/m.py: method_a( self, x: int )\n"));
+    /* Exactly one line: the first newline in the map is its last character
+     * — no embedded newline from the multi-line signature survives. */
+    const char *first_nl = strchr(map, '\n');
+    ASSERT_NOT_NULL(first_nl);
+    ASSERT_EQ((int)(strlen(map) - (size_t)(first_nl - map)), 1);
+    free(map);
+    free(text);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 /* ── Row 11: determinism ──────────────────────────────────────────── */
 
 TEST(repo_map_deterministic_byte_identical_across_calls) {
@@ -2876,6 +2952,7 @@ SUITE(mcp) {
     RUN_TEST(repo_map_seed_by_file_path);
     RUN_TEST(repo_map_seed_resolves_multiple_nodes);
     RUN_TEST(repo_map_weak_seed_triggers_widen_walk);
+    RUN_TEST(repo_map_module_usage_neighbor_expands_to_its_file_symbols);
     RUN_TEST(repo_map_no_seed_and_empty_seed_and_all_unresolvable_yield_identical_global_map);
     RUN_TEST(repo_map_mixed_resolvable_and_unresolvable_seeds_uses_seeded_mode);
     RUN_TEST(repo_map_unscored_project_returns_explicit_gate_error);
@@ -2887,6 +2964,7 @@ SUITE(mcp) {
     RUN_TEST(repo_map_malformed_seed_anchors_non_string_elements_skipped);
     RUN_TEST(repo_map_absurdly_long_seed_list_capped_no_hang);
     RUN_TEST(repo_map_renders_signature_level_no_body_leak);
+    RUN_TEST(repo_map_param_only_signature_gets_name_prefix_and_ws_flatten);
     RUN_TEST(repo_map_deterministic_byte_identical_across_calls);
     RUN_TEST(repo_map_no_cross_project_leakage);
     RUN_TEST(repo_map_repeated_calls_stable_no_leak_surface);
