@@ -630,6 +630,380 @@ TEST(tool_query_graph_missing_query) {
 }
 
 /* ══════════════════════════════════════════════════════════════════
+ *  PROJECT PARAM — missing-param vs not-found distinction + `project_id`
+ *  alias (pai/codebase-memory-search).
+ *
+ *  Root cause: cbm_mcp_get_string_arg returns NULL both for an absent key
+ *  and for an unknown key like `project_id`. resolve_store(srv, NULL) then
+ *  collapses "you forgot the param" into the SAME "project not found or not
+ *  indexed" + available_projects shape REQUIRE_STORE emits for a genuinely
+ *  unknown project — so a caller who mistypes `project_id` (instead of
+ *  `project`) sees a self-contradicting error naming a project that IS in
+ *  the available_projects list it just printed.
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* Row 1: missing `project` on every project-reading tool must return a
+ * NAMED missing-param error — never the conflated not-found shape. */
+static int check_missing_project_error(cbm_mcp_server_t *srv, const char *tool_name,
+                                       const char *args_json) {
+    char *raw = cbm_mcp_handle_tool(srv, tool_name, args_json);
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(strstr(raw, "required"));
+    ASSERT_NOT_NULL(strstr(raw, "project"));
+    ASSERT_NULL(strstr(raw, "not found or not indexed"));
+    ASSERT_NULL(strstr(raw, "available_projects"));
+    free(raw);
+    return 0;
+}
+
+TEST(missing_project_named_error_all_tools) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_EQ(check_missing_project_error(srv, "search_graph", "{}"), 0);
+    ASSERT_EQ(check_missing_project_error(
+                  srv, "query_graph", "{\"query\":\"MATCH (f:Function) RETURN f.name\"}"),
+              0);
+    ASSERT_EQ(check_missing_project_error(srv, "trace_path", "{\"function_name\":\"Foo\"}"), 0);
+    ASSERT_EQ(
+        check_missing_project_error(srv, "get_code_snippet", "{\"qualified_name\":\"foo.bar\"}"),
+        0);
+    ASSERT_EQ(check_missing_project_error(srv, "get_graph_schema", "{}"), 0);
+    ASSERT_EQ(check_missing_project_error(srv, "get_architecture", "{}"), 0);
+    ASSERT_EQ(check_missing_project_error(srv, "repo_map", "{}"), 0);
+    ASSERT_EQ(check_missing_project_error(srv, "search_code", "{\"pattern\":\"foo\"}"), 0);
+    ASSERT_EQ(check_missing_project_error(srv, "delete_project", "{}"), 0);
+    ASSERT_EQ(check_missing_project_error(srv, "index_status", "{}"), 0);
+    ASSERT_EQ(check_missing_project_error(srv, "detect_changes", "{}"), 0);
+    ASSERT_EQ(check_missing_project_error(srv, "manage_adr", "{}"), 0);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* Row 2: empty string and non-string JSON values for `project` must be
+ * treated as missing — never looked up as a (nonsensical) project name. */
+TEST(missing_project_empty_and_nonstring_treated_as_missing) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_EQ(check_missing_project_error(srv, "search_graph", "{\"project\":\"\"}"), 0);
+    ASSERT_EQ(check_missing_project_error(srv, "search_graph", "{\"project\":123}"), 0);
+    ASSERT_EQ(check_missing_project_error(srv, "search_graph", "{\"project\":null}"), 0);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* Row 3 (primary): `project_id` full success-path alias test against a REAL
+ * on-disk store — and, per the quality-check note on resolve_store's
+ * current_project cache (mcp.c: "already open for this project?"), the
+ * alias call runs AFTER a call for a genuinely DIFFERENT project, so this
+ * proves the alias survives resolve_store's close-and-reopen-from-disk path,
+ * not just the in-memory "already open" shortcut every other fixture in
+ * this suite relies on. cbm_store_open() resolves the exact same
+ * <CBM_CACHE_DIR>/<project>.db convention resolve_store uses (mcp.c
+ * project_db_path), so two real stores under a scratch CBM_CACHE_DIR make
+ * the reopen genuine. */
+/* Body extracted so the outer TEST restores CBM_CACHE_DIR even when an
+ * assertion fails (ASSERT early-returns; an in-test setenv would otherwise
+ * leak into every later suite — observed at the red boundary: the leaked
+ * scratch CBM_CACHE_DIR made the incremental suite's pipeline WRITE its
+ * index into the scratch dir while that suite's count reads stayed on its
+ * own fixed user-cache path, so nodes_before==0 divided to an ASan FPE at
+ * tests/test_incremental.c:771). */
+static int alias_cache_miss_body(const char *proj_a, const char *proj_b) {
+    cbm_store_t *sa = cbm_store_open(proj_a);
+    ASSERT_NOT_NULL(sa);
+    cbm_store_upsert_project(sa, proj_a, "/tmp/alias-cache-miss-a-root");
+    cbm_node_t node_a = {0};
+    node_a.project = proj_a;
+    node_a.label = "Function";
+    node_a.name = "AlphaFn";
+    node_a.qualified_name = "alias-cache-miss-a.AlphaFn";
+    node_a.file_path = "a.go";
+    cbm_store_upsert_node(sa, &node_a);
+    cbm_store_close(sa);
+
+    cbm_store_t *sb = cbm_store_open(proj_b);
+    ASSERT_NOT_NULL(sb);
+    cbm_store_upsert_project(sb, proj_b, "/tmp/alias-cache-miss-b-root");
+    cbm_node_t node_b = {0};
+    node_b.project = proj_b;
+    node_b.label = "Function";
+    node_b.name = "BetaFn";
+    node_b.qualified_name = "alias-cache-miss-b.BetaFn";
+    node_b.file_path = "b.go";
+    cbm_store_upsert_node(sb, &node_b);
+    cbm_store_close(sb);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL); /* in-memory placeholder */
+    ASSERT_NOT_NULL(srv);
+
+    /* First call: a real project via `project` (not the alias). Server
+     * started in-memory with current_project NULL, so this is a genuine
+     * disk open, not a fixture shortcut. */
+    char req_a[256];
+    snprintf(req_a, sizeof(req_a), "{\"project\":\"%s\",\"label\":\"Function\"}", proj_a);
+    char *raw_a = cbm_mcp_handle_tool(srv, "search_graph", req_a);
+    if (!raw_a) {
+        cbm_mcp_server_free(srv);
+        FAIL("search_graph via project returned NULL");
+    }
+    int ok_a = (strstr(raw_a, "\"isError\":true") == NULL && strstr(raw_a, "AlphaFn") != NULL);
+    free(raw_a);
+    if (!ok_a) {
+        cbm_mcp_server_free(srv);
+        FAIL("search_graph via project did not return AlphaFn success payload");
+    }
+
+    /* Second call: a DIFFERENT project via `project_id` ONLY — forces
+     * resolve_store's cache-miss branch (current_project == proj_a !=
+     * proj_b) to close proj_a's store and reopen proj_b's from disk. */
+    char req_b[256];
+    snprintf(req_b, sizeof(req_b), "{\"project_id\":\"%s\",\"label\":\"Function\"}", proj_b);
+    char *raw_b = cbm_mcp_handle_tool(srv, "search_graph", req_b);
+    if (!raw_b) {
+        cbm_mcp_server_free(srv);
+        FAIL("search_graph via project_id returned NULL");
+    }
+    int ok_b = (strstr(raw_b, "\"isError\":true") == NULL && strstr(raw_b, "BetaFn") != NULL);
+    free(raw_b);
+    cbm_mcp_server_free(srv);
+    if (!ok_b) {
+        FAIL("project_id alias did not resolve to BetaFn success payload");
+    }
+    return 0;
+}
+
+TEST(project_id_alias_search_graph_success_after_cache_miss) {
+    char cache[256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-alias-cache-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        FAIL("mkdtemp failed for scratch CBM_CACHE_DIR");
+    }
+    const char *saved = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    const char *proj_a = "alias-cache-miss-a";
+    const char *proj_b = "alias-cache-miss-b";
+
+    /* Assertion body runs in a helper so the env restore + scratch cleanup
+     * below ALWAYS execute — pass or fail — before this test returns. */
+    int body_rc = alias_cache_miss_body(proj_a, proj_b);
+
+    if (saved_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
+        free(saved_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    char dbpath[512];
+    const char *projs[2] = {proj_a, proj_b};
+    const char *suffixes[3] = {".db", ".db-wal", ".db-shm"};
+    for (int p = 0; p < 2; p++) {
+        for (int s = 0; s < 3; s++) {
+            snprintf(dbpath, sizeof(dbpath), "%s/%s%s", cache, projs[p], suffixes[s]);
+            cbm_unlink(dbpath);
+        }
+    }
+    cbm_rmdir(cache);
+
+    if (body_rc != 0) {
+        return body_rc;
+    }
+    PASS();
+}
+
+/* Row 3 (remaining 11 tools, minimum bar): `project_id` alone must reach the
+ * project-resolution logic with the ALIASED value, not fall back to the
+ * missing-param error — i.e. an unknown aliased project reports "not found"
+ * (a value was read and looked up), never "is required" (which would mean
+ * the alias was silently dropped and project fell back to NULL). Ordered
+ * with delete_project/search_code first: their pre-fix behaviour already
+ * distinguished missing-vs-not-found, so `project_id` being ignored pre-fix
+ * shows up as "is required" there — the discriminating, guaranteed-red case
+ * for this row. */
+static int check_project_id_alias_reaches_notfound(cbm_mcp_server_t *srv, const char *tool_name,
+                                                    const char *args_json) {
+    char *raw = cbm_mcp_handle_tool(srv, tool_name, args_json);
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NULL(strstr(raw, "is required"));
+    ASSERT_TRUE(strstr(raw, "not found") != NULL || strstr(raw, "not_found") != NULL);
+    free(raw);
+    return 0;
+}
+
+TEST(project_id_alias_reaches_notfound_remaining_tools) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_EQ(check_project_id_alias_reaches_notfound(srv, "delete_project",
+                                                      "{\"project_id\":\"totally-unknown-xyz\"}"),
+              0);
+    ASSERT_EQ(check_project_id_alias_reaches_notfound(srv, "search_code",
+                                                      "{\"project_id\":\"totally-unknown-xyz\","
+                                                      "\"pattern\":\"foo\"}"),
+              0);
+    ASSERT_EQ(
+        check_project_id_alias_reaches_notfound(
+            srv, "query_graph",
+            "{\"project_id\":\"totally-unknown-xyz\",\"query\":\"MATCH (f:Function) RETURN f\"}"),
+        0);
+    ASSERT_EQ(check_project_id_alias_reaches_notfound(
+                  srv, "trace_path",
+                  "{\"project_id\":\"totally-unknown-xyz\",\"function_name\":\"Foo\"}"),
+              0);
+    ASSERT_EQ(check_project_id_alias_reaches_notfound(
+                  srv, "get_code_snippet",
+                  "{\"project_id\":\"totally-unknown-xyz\",\"qualified_name\":\"foo.bar\"}"),
+              0);
+    ASSERT_EQ(check_project_id_alias_reaches_notfound(srv, "get_graph_schema",
+                                                      "{\"project_id\":\"totally-unknown-xyz\"}"),
+              0);
+    ASSERT_EQ(check_project_id_alias_reaches_notfound(srv, "get_architecture",
+                                                      "{\"project_id\":\"totally-unknown-xyz\"}"),
+              0);
+    ASSERT_EQ(check_project_id_alias_reaches_notfound(srv, "repo_map",
+                                                      "{\"project_id\":\"totally-unknown-xyz\"}"),
+              0);
+    ASSERT_EQ(check_project_id_alias_reaches_notfound(srv, "index_status",
+                                                      "{\"project_id\":\"totally-unknown-xyz\"}"),
+              0);
+    ASSERT_EQ(check_project_id_alias_reaches_notfound(srv, "detect_changes",
+                                                      "{\"project_id\":\"totally-unknown-xyz\"}"),
+              0);
+    ASSERT_EQ(check_project_id_alias_reaches_notfound(srv, "manage_adr",
+                                                      "{\"project_id\":\"totally-unknown-xyz\"}"),
+              0);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* Row 4: precedence — a PRESENT `project` always wins over `project_id`,
+ * even when `project` is the wrong one. */
+TEST(project_precedence_project_wins_over_project_id) {
+    char tmp[512];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    /* project (valid) + project_id (bogus) together → project wins → succeeds. */
+    char *raw = cbm_mcp_handle_tool(
+        srv, "search_graph",
+        "{\"project\":\"test-project\",\"project_id\":\"totally-unknown-xyz\","
+        "\"label\":\"Function\"}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NULL(strstr(raw, "\"isError\":true"));
+    free(raw);
+
+    /* Inverse: project (bogus) + project_id (valid) together → project still
+     * wins (even though it's wrong) → not-found. Pins that project_id never
+     * overrides a PRESENT project, right or wrong. This call also forces
+     * resolve_store's close-and-reopen (cache miss from "test-project" to
+     * "totally-unknown-xyz"), exercising that branch's failure path. */
+    char *raw2 = cbm_mcp_handle_tool(
+        srv, "search_graph",
+        "{\"project\":\"totally-unknown-xyz\",\"project_id\":\"test-project\","
+        "\"label\":\"Function\"}");
+    ASSERT_NOT_NULL(raw2);
+    ASSERT_NOT_NULL(strstr(raw2, "not found"));
+    free(raw2);
+
+    cleanup_snippet_dir(tmp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* Row 5: genuine not-found (a real value, just unknown) keeps the existing
+ * conflated "not found or not indexed" + available_projects shape — this
+ * distinction is exactly what row 1 proves is now NOT what a missing param
+ * gets. search_graph specifically, per the test plan. */
+TEST(search_graph_unknown_project_still_conflated_notfound_shape) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    char *raw = cbm_mcp_handle_tool(srv, "search_graph", "{\"project\":\"totally-unknown-xyz\"}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(strstr(raw, "not found or not indexed"));
+    free(raw);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* Row 7: param-check ordering preserved — the OTHER required param is
+ * reported independently of `project`'s presence/absence. Characterization
+ * pins: this ordering already held pre-fix (each handler already checked
+ * its other required param before touching `project`). */
+TEST(query_graph_missing_query_with_project_present_reports_query_required) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    char *raw = cbm_mcp_handle_tool(srv, "query_graph", "{\"project\":\"some-project\"}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(strstr(raw, "query is required"));
+    free(raw);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(trace_path_missing_function_name_with_project_present_reports_function_name_required) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    char *raw = cbm_mcp_handle_tool(srv, "trace_path", "{\"project\":\"some-project\"}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(strstr(raw, "function_name is required"));
+    free(raw);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(search_code_missing_pattern_with_project_present_reports_pattern_required) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    char *raw = cbm_mcp_handle_tool(srv, "search_code", "{\"project\":\"some-project\"}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(strstr(raw, "pattern is required"));
+    free(raw);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* Row 7 (new sub-case): BOTH query and project missing on query_graph —
+ * deterministic order, query checked first (matches pre-existing priority:
+ * query_graph already checked `query` before touching the store). */
+TEST(query_graph_both_query_and_project_missing_reports_query_required_first) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    char *raw = cbm_mcp_handle_tool(srv, "query_graph", "{}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(strstr(raw, "query is required"));
+    ASSERT_NULL(strstr(raw, "project is required"));
+    free(raw);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* Row 9: the `project_id` alias is silent forgiveness, never a documented
+ * parameter — it must not leak into the advertised tool schemas. */
+TEST(tools_list_does_not_advertise_project_id_alias) {
+    char *json = cbm_mcp_tools_list();
+    ASSERT_NOT_NULL(json);
+    ASSERT_NULL(strstr(json, "project_id"));
+    free(json);
+    PASS();
+}
+
+/* Row 10: detect_changes/manage_adr's not-found errors are upgraded to the
+ * same standard "not found or not indexed" + available_projects shape the
+ * other 10 tools use, instead of their previous bare "project not found". */
+TEST(detect_changes_unknown_project_uses_standard_notfound_shape) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    char *raw =
+        cbm_mcp_handle_tool(srv, "detect_changes", "{\"project\":\"totally-unknown-xyz\"}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(strstr(raw, "not found or not indexed"));
+    free(raw);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(manage_adr_unknown_project_uses_standard_notfound_shape) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    char *raw = cbm_mcp_handle_tool(srv, "manage_adr", "{\"project\":\"totally-unknown-xyz\"}");
+    ASSERT_NOT_NULL(raw);
+    ASSERT_NOT_NULL(strstr(raw, "not found or not indexed"));
+    free(raw);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
  *  PIPELINE-DEPENDENT TOOL HANDLERS
  * ══════════════════════════════════════════════════════════════════ */
 
@@ -816,6 +1190,11 @@ TEST(search_code_ampersand_accepted_issue272) {
     PASS();
 }
 
+/* pai/codebase-memory-search row 8: deliberately converted from asserting
+ * the OLD conflated "not found" message (a missing param is not a genuine
+ * not-found) to the new NAMED missing-param message. Must fail against
+ * unmodified code — old code returns "project not found" here, which
+ * contains "not found" and does not contain "project is required". */
 TEST(tool_detect_changes_no_project) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
 
@@ -824,13 +1203,15 @@ TEST(tool_detect_changes_no_project) {
                                    "\"params\":{\"name\":\"detect_changes\","
                                    "\"arguments\":{}}}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "not found"));
+    ASSERT_NOT_NULL(strstr(resp, "project is required"));
+    ASSERT_NULL(strstr(resp, "not found"));
     free(resp);
 
     cbm_mcp_server_free(srv);
     PASS();
 }
 
+/* pai/codebase-memory-search row 8: see tool_detect_changes_no_project above. */
 TEST(tool_manage_adr_no_project) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
 
@@ -839,7 +1220,8 @@ TEST(tool_manage_adr_no_project) {
                                    "\"params\":{\"name\":\"manage_adr\","
                                    "\"arguments\":{}}}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "not found"));
+    ASSERT_NOT_NULL(strstr(resp, "project is required"));
+    ASSERT_NULL(strstr(resp, "not found"));
     free(resp);
 
     cbm_mcp_server_free(srv);
@@ -2881,6 +3263,22 @@ SUITE(mcp) {
     RUN_TEST(tool_get_architecture_empty);
     RUN_TEST(tool_get_architecture_emits_populated_sections);
     RUN_TEST(tool_query_graph_missing_query);
+
+    /* Project param: missing-vs-not-found + project_id alias
+     * (pai/codebase-memory-search) */
+    RUN_TEST(missing_project_named_error_all_tools);
+    RUN_TEST(missing_project_empty_and_nonstring_treated_as_missing);
+    RUN_TEST(project_id_alias_search_graph_success_after_cache_miss);
+    RUN_TEST(project_id_alias_reaches_notfound_remaining_tools);
+    RUN_TEST(project_precedence_project_wins_over_project_id);
+    RUN_TEST(search_graph_unknown_project_still_conflated_notfound_shape);
+    RUN_TEST(query_graph_missing_query_with_project_present_reports_query_required);
+    RUN_TEST(trace_path_missing_function_name_with_project_present_reports_function_name_required);
+    RUN_TEST(search_code_missing_pattern_with_project_present_reports_pattern_required);
+    RUN_TEST(query_graph_both_query_and_project_missing_reports_query_required_first);
+    RUN_TEST(tools_list_does_not_advertise_project_id_alias);
+    RUN_TEST(detect_changes_unknown_project_uses_standard_notfound_shape);
+    RUN_TEST(manage_adr_unknown_project_uses_standard_notfound_shape);
 
     /* Pipeline-dependent tool handlers */
     RUN_TEST(tool_index_repository_missing_path);
