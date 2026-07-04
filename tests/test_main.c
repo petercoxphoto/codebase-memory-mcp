@@ -9,6 +9,7 @@ int tf_fail_count = 0;
 int tf_skip_count = 0;
 
 #include "test_framework.h"
+#include "foundation/compat.h" /* cbm_setenv — #845 supervisor kill switch */
 #include <sqlite3.h>
 #include <stdbool.h>
 #include <string.h>
@@ -134,6 +135,13 @@ extern void suite_dump_verify_io(void);
 extern void cbm_kind_in_set_free_cache(void);
 
 int main(int argc, char **argv) {
+    /* #845 belt-and-suspenders: this binary EMBEDS cbm_mcp_handle_tool. The
+     * supervisor gate already ignores unmarked hosts, but pin the kill switch
+     * too so even a future supervisor-marked test host can never resolve THIS
+     * binary as `<self> cli --index-worker …` and recursively re-run suites.
+     * A test that exercises the supervisor must explicitly re-enable it. */
+    cbm_setenv("CBM_INDEX_SUPERVISOR", "0", 1);
+
     g_suite_argc = argc;
     g_suite_argv = argv;
     printf("\n  codebase-memory-mcp  C test suite\n");
