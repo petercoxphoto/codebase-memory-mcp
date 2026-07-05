@@ -160,7 +160,8 @@ void cbm_pipeline_importance_append_prop(cbm_gbuf_node_t *node, double score) {
         return;
     }
     memcpy(neu, old, olen - 1); /* copy without the trailing '}' */
-    int w = snprintf(neu + (olen - 1), CBM_SZ_64, "%s\"importance\":%.6f}", empty ? "" : ",", score);
+    int w =
+        snprintf(neu + (olen - 1), CBM_SZ_64, "%s\"importance\":%.6f}", empty ? "" : ",", score);
     if (w < 0) {
         free(neu);
         return;
@@ -185,8 +186,8 @@ void cbm_pipeline_pass_importance(cbm_pipeline_ctx_t *ctx) {
         for (int i = 0; i < count; i++) {
             cbm_gbuf_node_t *n = (cbm_gbuf_node_t *)nodes[i];
 
-            int num_refs = incoming_edge_count(gb, n->id, "CALLS") +
-                           incoming_edge_count(gb, n->id, "USAGE");
+            int num_refs =
+                incoming_edge_count(gb, n->id, "CALLS") + incoming_edge_count(gb, n->id, "USAGE");
             double score = sqrt((double)num_refs);
 
             if (name_is_private(n->name)) {
@@ -198,8 +199,8 @@ void cbm_pipeline_pass_importance(cbm_pipeline_ctx_t *ctx) {
             if (name_is_distinctive(n->name)) {
                 score *= CBM_IMPORTANCE_DISTINCT_MUL;
             }
-            bool is_test = cbm_is_test_path(n->file_path) ||
-                           incoming_edge_count(gb, n->id, "TESTS") > 0;
+            bool is_test =
+                cbm_is_test_path(n->file_path) || incoming_edge_count(gb, n->id, "TESTS") > 0;
             if (is_test) {
                 score *= CBM_IMPORTANCE_TEST_MUL;
             }

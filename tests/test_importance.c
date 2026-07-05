@@ -141,8 +141,8 @@ TEST(importance_base_sqrt_num_refs) {
         cbm_gbuf_upsert_node(gb, "Function", "caller1", "pkg.caller1", "pkg/main.go", 2, 2, "{}");
     int64_t caller2 =
         cbm_gbuf_upsert_node(gb, "Function", "caller2", "pkg.caller2", "pkg/main.go", 3, 3, "{}");
-    int64_t consumer = cbm_gbuf_upsert_node(gb, "Function", "consumer", "pkg.consumer",
-                                            "pkg/main.go", 4, 4, "{}");
+    int64_t consumer =
+        cbm_gbuf_upsert_node(gb, "Function", "consumer", "pkg.consumer", "pkg/main.go", 4, 4, "{}");
     int64_t lonely =
         cbm_gbuf_upsert_node(gb, "Function", "lonelyfn", "pkg.lonelyfn", "pkg/main.go", 5, 5, "{}");
     ASSERT_GT(target, 0);
@@ -192,16 +192,16 @@ TEST(importance_private_multiplier) {
         char name[32], qn[48];
         snprintf(name, sizeof(name), "pcaller%d", i);
         snprintf(qn, sizeof(qn), "pkg.pcaller%d", i);
-        int64_t c = cbm_gbuf_upsert_node(gb, "Function", name, qn, "pkg/main.go", 10 + i, 10 + i,
-                                         "{}");
+        int64_t c =
+            cbm_gbuf_upsert_node(gb, "Function", name, qn, "pkg/main.go", 10 + i, 10 + i, "{}");
         cbm_gbuf_insert_edge(gb, c, priv_target, "CALLS", "{}");
     }
     for (int i = 0; i < 4; i++) {
         char name[32], qn[48];
         snprintf(name, sizeof(name), "qcaller%d", i);
         snprintf(qn, sizeof(qn), "pkg.qcaller%d", i);
-        int64_t c = cbm_gbuf_upsert_node(gb, "Function", name, qn, "pkg/main.go", 20 + i, 20 + i,
-                                         "{}");
+        int64_t c =
+            cbm_gbuf_upsert_node(gb, "Function", name, qn, "pkg/main.go", 20 + i, 20 + i, "{}");
         cbm_gbuf_insert_edge(gb, c, pub_target, "CALLS", "{}");
     }
 
@@ -309,8 +309,8 @@ TEST(importance_distinctive_identifier_multiplier) {
     for (int i = 0; i < N_CASES; i++) {
         char qn[64];
         snprintf(qn, sizeof(qn), "pkg.%s", cases[i].name);
-        ids[i] =
-            cbm_gbuf_upsert_node(gb, "Function", cases[i].name, qn, "pkg/main.go", i + 1, i + 1, "{}");
+        ids[i] = cbm_gbuf_upsert_node(gb, "Function", cases[i].name, qn, "pkg/main.go", i + 1,
+                                      i + 1, "{}");
         char cname[32], cqn[64];
         snprintf(cname, sizeof(cname), "caller_of_%d", i);
         snprintf(cqn, sizeof(cqn), "pkg.caller_of_%d", i);
@@ -364,9 +364,9 @@ TEST(importance_test_penalty_edge_based) {
     /* (b) inversion/discriminating check: PATH contains "test" as a
      * substring but there is NO TESTS/TESTS_FILE edge -> must NOT be
      * penalized (proves the strstr path was truly replaced). */
-    int64_t path_substr = cbm_gbuf_upsert_node(gb, "Function", "latest_helper_fn",
-                                               "pkg.latest_helper_fn", "src/testutil_helpers.go", 1,
-                                               1, "{}");
+    int64_t path_substr =
+        cbm_gbuf_upsert_node(gb, "Function", "latest_helper_fn", "pkg.latest_helper_fn",
+                             "src/testutil_helpers.go", 1, 1, "{}");
     int64_t ps_caller =
         cbm_gbuf_upsert_node(gb, "Function", "pscaller", "pkg.pscaller", "pkg/main.go", 3, 3, "{}");
     cbm_gbuf_insert_edge(gb, ps_caller, path_substr, "CALLS", "{}");
@@ -375,17 +375,15 @@ TEST(importance_test_penalty_edge_based) {
      * TESTS_FILE file-level edge (pass_tests never emits a direct TESTS
      * edge here because the target already lives in a test-classified
      * file -- see create_tests_edges' tgt_is_test exclusion). */
-    int64_t test_file_node =
-        cbm_gbuf_upsert_node(gb, "File", "recA_test.go", "pkg.__file__.recA_test.go",
-                             "recA_test.go", 0, 0, "{}");
-    int64_t prod_file_node = cbm_gbuf_upsert_node(gb, "File", "recA.go", "pkg.__file__.recA.go",
-                                                  "recA.go", 0, 0, "{}");
+    int64_t test_file_node = cbm_gbuf_upsert_node(
+        gb, "File", "recA_test.go", "pkg.__file__.recA_test.go", "recA_test.go", 0, 0, "{}");
+    int64_t prod_file_node =
+        cbm_gbuf_upsert_node(gb, "File", "recA.go", "pkg.__file__.recA.go", "recA.go", 0, 0, "{}");
     cbm_gbuf_insert_edge(gb, test_file_node, prod_file_node, "TESTS_FILE", "{}");
     int64_t seed_fn = cbm_gbuf_upsert_node(gb, "Function", "seed_recording_fn",
                                            "pkg.seed_recording_fn", "recA_test.go", 5, 5, "{}");
-    int64_t seed_caller =
-        cbm_gbuf_upsert_node(gb, "Function", "seedcaller", "pkg.seedcaller", "pkg/main.go", 4, 4,
-                             "{}");
+    int64_t seed_caller = cbm_gbuf_upsert_node(gb, "Function", "seedcaller", "pkg.seedcaller",
+                                               "pkg/main.go", 4, 4, "{}");
     cbm_gbuf_insert_edge(gb, seed_caller, seed_fn, "CALLS", "{}");
 
     atomic_int cancelled = 0;
@@ -396,13 +394,13 @@ TEST(importance_test_penalty_edge_based) {
     /* num_refs=1, distinct(snake,len>=8)=10 for all of these -> the only
      * variable is the test_penalty factor (0.1 penalized, 1.0 not). */
     ASSERT_FLOAT_EQ(extract_importance(cbm_gbuf_find_by_id(gb, helper)->properties_json),
-                   sqrt(1.0) * 10.0 * 0.1, 1e-6);
+                    sqrt(1.0) * 10.0 * 0.1, 1e-6);
     ASSERT_FLOAT_EQ(extract_importance(cbm_gbuf_find_by_id(gb, control)->properties_json),
-                   sqrt(1.0) * 10.0, 1e-6);
+                    sqrt(1.0) * 10.0, 1e-6);
     ASSERT_FLOAT_EQ(extract_importance(cbm_gbuf_find_by_id(gb, path_substr)->properties_json),
-                   sqrt(1.0) * 10.0, 1e-6); /* NOT penalized despite "test" substring */
+                    sqrt(1.0) * 10.0, 1e-6); /* NOT penalized despite "test" substring */
     ASSERT_FLOAT_EQ(extract_importance(cbm_gbuf_find_by_id(gb, seed_fn)->properties_json),
-                   sqrt(1.0) * 10.0 * 0.1, 1e-6); /* penalized via TESTS_FILE membership */
+                    sqrt(1.0) * 10.0 * 0.1, 1e-6); /* penalized via TESTS_FILE membership */
 
     cbm_gbuf_free(gb);
     PASS();
@@ -420,9 +418,9 @@ TEST(importance_ordering_after_tests_and_calls) {
     snprintf(tmpdir, sizeof(tmpdir), "%s", tmp);
 
     const char *names[] = {"helpers.go", "main_test.go"};
-    const char *contents[] = {
-        "package main\n\nfunc make_fixture_fn() {}\n",
-        "package main\n\nimport \"testing\"\n\nfunc TestFixture(t *testing.T) { make_fixture_fn() }\n"};
+    const char *contents[] = {"package main\n\nfunc make_fixture_fn() {}\n",
+                              "package main\n\nimport \"testing\"\n\nfunc TestFixture(t "
+                              "*testing.T) { make_fixture_fn() }\n"};
     if (write_files(tmpdir, names, contents, 2) != 0) {
         th_rmtree(tmpdir);
         FAIL("write fixture");
@@ -570,8 +568,8 @@ TEST(importance_properties_json_valid_after_append) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test-proj", "/tmp/test");
     ASSERT_NOT_NULL(gb);
 
-    int64_t a = cbm_gbuf_upsert_node(gb, "Function", "alpha_fn", "pkg.alpha_fn", "pkg/a.go", 1, 1,
-                                     "{}");
+    int64_t a =
+        cbm_gbuf_upsert_node(gb, "Function", "alpha_fn", "pkg.alpha_fn", "pkg/a.go", 1, 1, "{}");
     int64_t b = cbm_gbuf_upsert_node(gb, "Function", "beta_fn", "pkg.beta_fn", "pkg/b.go", 1, 1,
                                      "{\"docstring\":\"hi\"}");
     int64_t caller =

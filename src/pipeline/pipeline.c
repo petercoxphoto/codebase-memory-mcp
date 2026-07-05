@@ -707,9 +707,12 @@ static void run_predump_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
         const char *name;
         bool moderate_only; /* true = skip in fast mode */
     } passes[] = {
-        {predump_deco, "decorator_tags", false}, {predump_cfg, "configlink", false},
-        {predump_route, "route_match", false},   {predump_sim, "similarity", true},
-        {predump_sem, "semantic_edges", true},   {predump_complexity, "complexity", false},
+        {predump_deco, "decorator_tags", false},
+        {predump_cfg, "configlink", false},
+        {predump_route, "route_match", false},
+        {predump_sim, "similarity", true},
+        {predump_sem, "semantic_edges", true},
+        {predump_complexity, "complexity", false},
         /* MUST run after pass_tests (TESTS/TESTS_FILE edges, run_tests_and_history --
          * always precedes run_predump_passes) and after CALLS/USAGE edges (populated
          * during sequential extraction, before run_post_extraction). Placed last so
